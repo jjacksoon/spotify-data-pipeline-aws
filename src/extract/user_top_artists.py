@@ -13,4 +13,4 @@ def get_user_top_artists(access_token: str, limit: int = 20) -> dict:
     )
 
     response.raise_for_status()
-    return response.json()
+    return response.json(), response.status_code

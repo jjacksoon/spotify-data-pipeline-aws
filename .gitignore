@@ -1,0 +1,30 @@
+# Ambiente virtual
+.venv/
+venv/
+
+# Variáveis de ambiente
+.env
+
+# Tokens e credenciais
+token.json
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+
+# Logs
+*.log
+
+# Arquivos de build
+dist/
+build/
+
+# Cache pytest
+.pytest_cache/
