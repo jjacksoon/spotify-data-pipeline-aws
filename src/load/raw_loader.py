@@ -1,0 +1,24 @@
+import json
+from datetime import datetime
+from pathlib import Path
+
+def save_recently_played_raw(data : dict) -> Path:
+    '''
+    Salva a resposta bruta do retorno da chamada da API do Spotify (recently played)
+    em camada Raw, particionada por data de extração
+    '''
+
+    base_path = Path("data/raw/spotify/recently_played")
+
+    extraction_date = datetime.now().strftime("%Y-%m-%d")
+    extraction_time = datetime.now().strftime("%Y%m%dT%H%M%S")
+
+    folder = base_path / f"extraction_date = {extraction_date}"
+    folder.mkdir(parents = True, exist_ok = True)
+
+    file_path = folder / f"recently_played_{extraction_time}.json"
+
+    with open(file_path, "w", encoding = "utf-8") as f:
+        json.dump(data, f, ensure_ascii = False, indent = 2)
+
+    return file_path

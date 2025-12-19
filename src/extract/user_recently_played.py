@@ -12,4 +12,4 @@ def get_recently_played(access_token: str, limit: int = 20) -> dict:
     )
 
     response.raise_for_status()
-    return response.json(), response.status_code
+    return response.json()

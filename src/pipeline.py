@@ -1,28 +1,28 @@
 import json
-import requests
 from pathlib import Path
+
 from extract.user_recently_played import get_recently_played
+from load.raw_loader import save_recently_played_raw
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 TOKEN_PATH = BASE_DIR / "token.json"
 
 
-def load_access_token():
-    with open(TOKEN_PATH) as f:
+def load_access_token() -> str:
+    with open(TOKEN_PATH, encoding="utf-8") as f:
         return json.load(f)["access_token"]
 
-#Pegando músicas ouvidas recentemente
+
 def run_recently_played():
     token = load_access_token()
 
-    data, status_code = get_recently_played(token, 10)
-    try:
-        if status_code == 200:
-            print(data)
-        else:
-            raise Exception(f"Requisição não foi bem sucedida. Status code retornado: {status_code}")
-    except Exception as e:
-        print("Erro na requisição", e)
+    data = get_recently_played(token, limit=10)
+
+    file_path = save_recently_played_raw(data)
+
+    print(f"✅ RAW salvo com sucesso em: {file_path}")
+
 
 if __name__ == "__main__":
     run_recently_played()
