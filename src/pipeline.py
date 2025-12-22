@@ -4,6 +4,7 @@ from pathlib import Path
 from src.extract.spotify.user_recently_played import get_recently_played
 from src.load.raw.raw_loader import save_recently_played_raw
 from src.transform.silver.silver_recently_played import run_silver
+from src.transform.gold.gold_recently_played import run_gold
 
 
 
@@ -28,7 +29,13 @@ def run_pipeline():
     # 2. Silver
     run_silver()
 
-    print("✅ Pipeline finalizado com sucesso")
+    print(f"📥 SILVER gerada com sucesso")
+
+    # 3. Gold
+    run_gold()
+    print("🥇 GOLD gerada com sucesso")
+
+    print("✅ Pipeline finalizada com sucesso")
 
 if __name__ == "__main__":
     run_pipeline()
