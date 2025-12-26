@@ -2,129 +2,107 @@ import psycopg2
 from dotenv import load_dotenv
 import os
 
-#Carregando variáveis de ambiente
-load_dotenv() # lê o arquivo .env e carrega as variáveis para o Python
+# 1. Carregar variáveis do .env
+load_dotenv()
 
-# Criar conexão com o banco
-conn = psycopg2.connect(
-    host=os.getenv("POSTGRES_HOST"),
-    port=os.getenv("POSTGRES_PORT"),
-    database=os.getenv("POSTGRES_DB"),
-    user=os.getenv("POSTGRES_USER"),
-    password=os.getenv("POSTGRES_PASSWORD")
-)
-
-#Criar um cursor para executar comandos SQL - percorrer os resultados de uma consulta linha por linha
-cursor = conn.cursor()
-
-#Criação do Schema SILVER
-create_schema_silver = """
-    CREATE SCHEMA IF NOT EXISTS silver
-"""
-
-#Criação da tabela Silver recently_played
-
-# =========================
-# recently_played
-# =========================
-
-create_recently_played = """
-    CREATE TABLE IF NOT EXISTS silver.recently_played(
-        played_at TIMESTAMP,
-        track_id VARCHAR,
-        track_name VARCHAR,
-        duration_ms INT,
-        popularity INT,
-        explicit BOOLEAN,
-        album_id VARCHAR,
-        album_name VARCHAR,
-        album_release_date DATE,
-        artist_id VARCHAR,
-        artist_name VARCHAR,
-        load_date DATE,
-        CONSTRAINT pk_recently_played PRIMARY KEY (played_at, track_id)
-    )
-"""
-
-#Criação do Schema GOLD
-create_schema_gold = """
-    CREATE SCHEMA IF NOT EXISTS gold
-"""
-
-#Criação das tabelas dimensão
-
-# =========================
-# DIM ARTIST
-# =========================
-
-create_dim_artist = ("""
-    CREATE TABLE IF NOT EXISTS gold.dim_artist(
-    artist_id VARCHAR PRIMARY KEY,
-    artist_name VARCHAR
-    );
-""")
-
-# =========================
-# DIM ALBUM
-# =========================
-
-create_dim_album = ("""
-    CREATE TABLE IF NOT EXISTS gold.dim_album(
-    album_id VARCHAR PRIMARY KEY,
-    album_name VARCHAR,
-    album_release_date DATE,
-    artist_id VARCHAR REFERENCES gold.dim_artist(artist_id)
-    );
-""")
-
-# =========================
-# DIM TRACK
-# =========================
-
-create_dim_track = ("""
-    CREATE TABLE IF NOT EXISTS gold.dim_track(
-    track_id VARCHAR PRIMARY KEY,
-    track_name VARCHAR,
-    explicit BOOLEAN,
-    popularity INT
-    );
-""")
-
-
-
-#Criação das tabelas Fato
-
-# =========================
-# FACT RECENTLY PLAYED
-# =========================
-
-create_fact_recently_played = ("""
-    CREATE TABLE IF NOT EXISTS gold.fact_recently_played(
-    played_at TIMESTAMP,
-    track_id VARCHAR REFERENCES gold.dim_track(track_id),
-    album_id VARCHAR REFERENCES gold.dim_album(album_id),
-    duration_ms INT,
-    PRIMARY KEY (played_at, track_id)
-    );
-""")
-
-
-#Executar comandos SQL
 def create_tables():
-    cursor.execute(create_schema_silver)
-    cursor.execute(create_recently_played)
-    cursor.execute(create_schema_gold)
-    cursor.execute(create_dim_artist)
-    cursor.execute(create_dim_album)
-    cursor.execute(create_dim_track)
-    cursor.execute(create_fact_recently_played)
+    """
+    Conecta ao RDS e cria a estrutura de schemas e tabelas para o projeto Spotify.
+    """
+    conn = None
+    try:
+        # 2. Criar conexão usando as variáveis do seu .env
+        conn = psycopg2.connect(
+            host=os.getenv("DB_HOST"),
+            port=os.getenv("DB_PORT"),
+            database=os.getenv("DB_NAME"),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD")
+        )
+        
+        cursor = conn.cursor()
 
-    #Confirmar alterações
-    conn.commit()
+        # --- SCHEMA SILVER ---
+        print("🛠️ Criando Schema SILVER...")
+        cursor.execute("CREATE SCHEMA IF NOT EXISTS silver;")
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS silver.recently_played(
+                played_at TIMESTAMP,
+                track_id VARCHAR,
+                track_name VARCHAR,
+                duration_ms INT,
+                popularity INT,
+                explicit BOOLEAN,
+                album_id VARCHAR,
+                album_name VARCHAR,
+                album_release_date DATE,
+                artist_id VARCHAR,
+                artist_name VARCHAR,
+                load_date DATE,
+                CONSTRAINT pk_recently_played PRIMARY KEY (played_at, track_id)
+            );
+        """)
 
-    #Fechar cursor e conexão
-    cursor.close()
-    conn.close()
+        # --- SCHEMA GOLD ---
+        print("🛠️ Criando Schema GOLD e Dimensões...")
+        cursor.execute("CREATE SCHEMA IF NOT EXISTS gold;")
 
-    print("✅ Tabelas criadas com sucesso")
+        # Dimensão Artista
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gold.dim_artist(
+                artist_id VARCHAR PRIMARY KEY,
+                artist_name VARCHAR
+            );
+        """)
 
+        # Dimensão Álbum
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gold.dim_album(
+                album_id VARCHAR PRIMARY KEY,
+                album_name VARCHAR,
+                album_release_date DATE,
+                artist_id VARCHAR REFERENCES gold.dim_artist(artist_id)
+            );
+        """)
+
+        # Dimensão Música (Track)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gold.dim_track(
+                track_id VARCHAR PRIMARY KEY,
+                track_name VARCHAR,
+                explicit BOOLEAN,
+                popularity INT
+            );
+        """)
+
+        # --- TABELA FATO ---
+        print("🛠️ Criando Tabela Fato...")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gold.fact_recently_played(
+                played_at TIMESTAMP,
+                track_id VARCHAR REFERENCES gold.dim_track(track_id),
+                album_id VARCHAR REFERENCES gold.dim_album(album_id),
+                duration_ms INT,
+                PRIMARY KEY (played_at, track_id)
+            );
+        """)
+
+        # 3. Confirmar alterações
+        conn.commit()
+        print("✅ Estrutura de banco de dados criada com sucesso no RDS!")
+
+    except Exception as e:
+        print(f"❌ Erro ao conectar ou criar tabelas no RDS: {e}")
+        if conn:
+            conn.rollback()
+    
+    finally:
+        # 4. Fechar cursor e conexão de forma segura
+        if 'cursor' in locals() and cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+if __name__ == "__main__":
+    create_tables()

@@ -1,15 +1,8 @@
 import json
 from pathlib import Path
-
 from src.extract.spotify.user_recently_played import get_recently_played
-from src.load.raw.raw_loader import save_recently_played_raw
-from src.transform.silver.silver_recently_played import run_silver
-from src.transform.gold.gold_recently_played import run_gold
+from src.load.raw.raw_loader import save_recently_played_raw_to_s3 
 from src.load.db.create_tables import create_tables
-from src.load.db.load_silver_to_db import run_load_silver_to_db
-from src.load.db.load_gold_to_db import run_load_gold_to_db
-
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 TOKEN_PATH = BASE_DIR / "token.json"
@@ -18,36 +11,28 @@ def load_access_token() -> str:
     with open(TOKEN_PATH, encoding="utf-8") as f:
         return json.load(f)["access_token"]
 
-
 def run_pipeline():
-    print("🚀 Pipeline iniciado")
+    print("🚀 Iniciando Migração para Cloud...")
 
-   # 0. Garantir estrutura do banco
+    # 1. Banco de Dados (Amazon RDS)
+    # Testa se o Python consegue conectar e criar os Schemas Silver e Gold no RDS
     create_tables()
-    print("🗄️ Estrutura do banco garantida")
+    print("🗄️ Estrutura de Schemas garantida no RDS")
 
-    # 1. Extract + Raw
+    # 2. Extração + Carga Raw (Amazon S3)
     token = load_access_token()
     data = get_recently_played(token, limit=10)
-    raw_path = save_recently_played_raw(data)
-    print(f"📥 RAW gerada em {raw_path}")
+    
+    # Agora o dado não toca mais o seu disco rígido, vai direto pra nuvem
+    s3_key = save_recently_played_raw_to_s3(data)
+    print(f"📥 Dados brutos enviados para o S3: {s3_key}")
 
-    # 2. Silver
-    run_silver()
-    print("🥈 SILVER gerada com sucesso")
-
-    # 3. Gold (CSV)
-    run_gold()
-    print("🥇 GOLD gerada com sucesso")
-
-    # 4. Load Silver → PostgreSQL
-    run_load_silver_to_db()
-
-    # 4. Load Gold → PostgreSQL
-    run_load_gold_to_db()
-
-    print("✅ Pipeline finalizada com sucesso")
-
+    print("\n--- STATUS DA MIGRAÇÃO ---")
+    print("✅ RAW: Migrado para S3")
+    print("✅ INFRA: Migrado para RDS")
+    print("⏳ SILVER: Pendente (Próximo passo)")
+    print("⏳ GOLD: Pendente")
+    print("--------------------------")
 
 if __name__ == "__main__":
     run_pipeline()
