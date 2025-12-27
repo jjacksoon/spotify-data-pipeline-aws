@@ -42,3 +42,5 @@ def save_recently_played_raw_to_s3(data: dict) -> str:
     except Exception as e:
         print(f"❌ Erro ao salvar no S3: {e}")
         raise
+
+    return s3_key
