@@ -1,222 +1,122 @@
-from pathlib import Path
+import os
+import boto3
 import pandas as pd
+from io import StringIO
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
 
-# Diretórios
-BASE_DIR = Path(__file__).resolve().parents[3]
-SILVER_FILE = BASE_DIR / "data" / "silver" / "recently_played.csv"
-GOLD_DIR = BASE_DIR / "data" / "gold"
-GOLD_DIR.mkdir(parents=True, exist_ok=True)
+#Carregando variáveis de ambiente
+load_dotenv()
 
-# Arquivos Gold
-FACT_FILE = GOLD_DIR / "fact_recently_played.csv"
-DIM_ARTIST_FILE = GOLD_DIR / "dim_artist.csv"
-DIM_ALBUM_FILE = GOLD_DIR / "dim_album.csv"
-DIM_TRACK_FILE = GOLD_DIR / "dim_track.csv"
+#Configuração AWS e Banco
+BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
+s3_client = boto3.client('s3')
 
+def get_db_engine():
+    """Cria conexão com o RDS PostgreSQL"""
+    user = os.getenv("DB_USER")
+    password = os.getenv("DB_PASSWORD")
+    host = os.getenv("DB_HOST")
+    port = os.getenv("DB_PORT")
+    database =os.getenv("DB_NAME")
+    return create_engine(f'postgresql://{user}:{password}@{host}:{port}/{database}')
 
 # =========================
 # Leitura da Silver
 # =========================
-def load_silver() -> pd.DataFrame:
-    return pd.read_csv(SILVER_FILE, parse_dates=["played_at"])
+def load_silver_from_s3() -> pd.DataFrame:
+    """lê a tabela silver consolidando direto no s3"""
+    silver_key = "silver/recently_played.csv"
+    response = s3_client.get_object(Bucket = BUCKET_NAME, Key = silver_key)
+    
+    #Lendo csv da memódia (Body) para o pandas
+    return pd.read_csv(response['Body'], parse_dates=["played_at"])
 
+def save_gold_incremental(df_new: pd.DataFrame, table_name: str, pk_columns: list):
+    """Função genérica para Carga Incremental na Gold (S3 + RDS).
+    pk_columns: colunas que identificam se o registro é único (ex: artist_id)
+    """
+    s3_key = f"gold/{table_name}.csv"
 
-# =========================
-# Dimensões
-# =========================
-def build_dim_artist_incremental(df: pd.DataFrame):
-    # 1. Criação da dimensão a partir da silver
-    dim_new = (
-        df[["artist_id", "artist_name"]]
-        .drop_duplicates(subset=["artist_id"])
-        .reset_index(drop=True)
-        .copy()
+    # --- 1. LÓGICA INCREMENTAL NO S3 ---
+    try:
+        #tente ler o que já existe na gold do S3
+        response = s3_client.get_object(Bucket = BUCKET_NAME, Key = s3_key)
+        df_existing = pd.read_csv(response['Body'])
+
+        #Faça o merge para identificar o que é novo (Left Anti-Join)
+        df_merged = df_new.merge(
+            df_existing[pk_columns], on = pk_columns, how = "left", indicator= True
+        )
+        df_to_insert = df_merged[df_merged["_merge"]== "left_only"].drop(columns="_merge")
+
+        #DataFrame final consolidado
+        df_final = pd.concat([df_existing, df_to_insert], ignore_index = True)
+
+    except s3_client.exceptions.NoSuchKey:
+        #Se a tabela não existe, tudo é novo
+        print(f"✨ Criando nova tabela Gold no S3: {table_name}")
+        df_final = df_new           #Se não existe tabela  → o resultado final é exatamente o dado novo
+        df_to_insert = df_final     #O que será persistido no S3, ou seja, tudo que chegou agora será inserido
+    
+    if df_to_insert.empty:
+        print(f"⚠️ {table_name}: Sem registros novos.")
+    else:
+        #Salva o arquivo completo de volta no S3
+        csv_buffer = StringIO()
+        df_final.to_csv(csv_buffer, index = False)
+        s3_client.put_object(
+            Bucket = BUCKET_NAME,
+            Key = s3_key, 
+            Body = csv_buffer.getvalue()
+        )
+        print(f"✅ {table_name} atualizada no S3: +{len(df_to_insert)} linhas.")
+
+    
+    # --- 2. SINCRONIZAÇÃO COM O RDS ---
+    engine = get_db_engine()
+    
+    with engine.connect() as conn:
+        # O segredo é envolver a string no text()
+        conn.execute(text(f"DROP TABLE IF EXISTS gold.{table_name} CASCADE;"))
+        # No SQLAlchemy 2.0, o commit deve ser explícito em conexões manuais
+        conn.commit()
+
+    # Agora o Pandas segue com o processo normal
+    df_final.to_sql(
+        table_name, 
+        con=engine, 
+        schema='gold', 
+        if_exists='replace', 
+        index=False
     )
-
-    if dim_new.empty:
-        print("⚠️ Nenhum artista novo para processar")
-        return
-    
-    # 2. Se a tabela dimensão já existe, fazer carga incremental
-    if DIM_ARTIST_FILE.exists():
-        dim_existing = pd.read_csv(DIM_ARTIST_FILE)
-
-        # Fazer o left join
-        dim_merged = dim_new.merge(
-            dim_existing[["artist_id"]],
-            on="artist_id",
-            how="left",
-            indicator=True
-        )
-
-        dim_to_insert = (
-            dim_merged[dim_merged["_merge"] == "left_only"]
-            .drop(columns="_merge")
-        )
-    else:
-        # primeira carga
-        dim_to_insert = dim_new
-
-    if dim_to_insert.empty:
-        print("⚠️ DIM Artist já está atualizada — nenhum novo registro")
-        return
-    
-    # 3. Salvando incrementalmente
-    if DIM_ARTIST_FILE.exists():
-        dim_to_insert.to_csv(DIM_ARTIST_FILE, mode="a", index=False, header=False)
-    else:
-        dim_to_insert.to_csv(DIM_ARTIST_FILE, index=False)
-    
-    print(f"✅ DIM Artist incrementada com {len(dim_to_insert)} registros")
+    print(f"🏆 RDS: gold.{table_name} sincronizada ({len(df_final)} total).")
 
 
-def build_dim_album_incremental(df: pd.DataFrame):
-    # 1. Criação da dimensão a partir da silver
-    dim_new = (
-        df[["album_id", "album_name", "album_release_date", "artist_id"]]
-        .drop_duplicates(subset=["album_id"])
-        .reset_index(drop=True)
-        .copy()
-    )
-
-    if dim_new.empty:
-        print("⚠️ Nenhum álbum novo para processar")
-        return
-    
-    # 2. Se a tabela dimensão já existe, fazer carga incremental
-    if DIM_ALBUM_FILE.exists():
-        dim_existing = pd.read_csv(DIM_ALBUM_FILE)
-
-        # Fazer left join
-        dim_merged = dim_new.merge(
-            dim_existing[["album_id"]],
-            on="album_id",
-            how="left",
-            indicator=True
-        )
-
-        dim_to_insert = (
-            dim_merged[dim_merged["_merge"] == "left_only"]
-            .drop(columns="_merge")
-        )
-    else:
-        # primeira carga
-        dim_to_insert = dim_new
-    
-    if dim_to_insert.empty:
-        print("⚠️ DIM Album já está atualizada — nenhum novo registro")
-        return
-    
-    # 3. Salvando incrementalmente
-    if DIM_ALBUM_FILE.exists():
-        dim_to_insert.to_csv(DIM_ALBUM_FILE, mode="a", index=False, header=False)
-    else:
-        dim_to_insert.to_csv(DIM_ALBUM_FILE, index=False)
-
-    print(f"✅ DIM Álbum incrementada com {len(dim_to_insert)} registros")
-
-
-def build_dim_track_incremental(df: pd.DataFrame):
-    # 1. Criação da dimensão a partir da silver
-    dim_new = (
-        df[["track_id", "track_name", "explicit", "popularity"]]
-        .drop_duplicates(subset=["track_id"])
-        .reset_index(drop=True)
-        .copy()
-    )
-
-    if dim_new.empty:
-        print("⚠️ Nenhuma faixa nova para processar")
-        return
-
-    # 2. Se a tabela dimensão já existe, fazer carga incremental
-    if DIM_TRACK_FILE.exists():
-        dim_existing = pd.read_csv(DIM_TRACK_FILE)
-
-        # Fazer left join
-        dim_merged = dim_new.merge(
-            dim_existing[["track_id"]],
-            on="track_id",
-            how="left",
-            indicator=True
-        )
-
-        dim_to_insert = (
-            dim_merged[dim_merged["_merge"] == "left_only"]
-            .drop(columns="_merge")
-        )
-    else:
-        # Primeira carga
-        dim_to_insert = dim_new
-    
-    if dim_to_insert.empty:
-        print("⚠️ DIM Faixa já está atualizada — nenhum novo registro")
-        return
-    
-    # 3. Salvando incrementalmente
-    if DIM_TRACK_FILE.exists():
-        dim_to_insert.to_csv(DIM_TRACK_FILE, mode="a", index=False, header=False)
-    else:
-        dim_to_insert.to_csv(DIM_TRACK_FILE, index=False)
-
-
-# =========================
-# Fato
-# =========================
-def build_fact_recently_played_incremental(df: pd.DataFrame):
-    # 1. Criação da tabela fato a partir da Silver
-    fact_new = df[
-        ["played_at", "track_id", "album_id", "duration_ms"]
-    ].copy()
-
-    if fact_new.empty:
-        print("⚠️ Nenhum dado novo para a Fato")
-        return
-
-    # 2. Se a tabela fato já existe, fazer carga incremental
-    if FACT_FILE.exists():
-        fact_existing = pd.read_csv(FACT_FILE, parse_dates=["played_at"])
-
-        # Left anti join
-        fact_merged = fact_new.merge(
-            fact_existing[["played_at", "track_id"]],
-            on=["played_at", "track_id"],
-            how="left",
-            indicator=True
-        )
-
-        fact_to_insert = (
-            fact_merged[fact_merged["_merge"] == "left_only"]
-            .drop(columns="_merge")
-        )
-    else:
-        # Primeira carga
-        fact_to_insert = fact_new
-
-    if fact_to_insert.empty:
-        print("⚠️ Tabela Fato já está atualizada — nenhum novo registro")
-        return
-
-    # 3. Salvando incrementalmente
-    if FACT_FILE.exists():
-        fact_to_insert.to_csv(FACT_FILE, mode="a", index=False, header=False)
-    else:
-        fact_to_insert.to_csv(FACT_FILE, index=False)
-
-    print(f"✅ Fato incrementada com {len(fact_to_insert)} novos registros")
-
-
-# =========================
-# Pipeline Gold
-# =========================
 def run_gold():
-    print("🥇 Iniciando camada GOLD")
+    print(f"🥇 Iniciando processamento GOLD (Cloud)...")
+    
+    # Carregando dados da Silver (S3)
+    df = load_silver_from_s3()
 
-    df = load_silver()
+    # --- PROCESSAMENTO DAS TABELAS DIMENSÕES ---
 
-    build_dim_artist_incremental(df)
-    build_dim_album_incremental(df)
-    build_dim_track_incremental(df)
-    build_fact_recently_played_incremental(df)
+    # Artist (unique by artist_id)
+    dim_artist = df[["artist_id", "artist_name"]].drop_duplicates(subset = ["artist_id"])
+    save_gold_incremental(dim_artist, "dim_artist", ["artist_id"])
 
-    print("✅ Camada GOLD criada com sucesso")
+    # Album (unique by album_id)
+    dim_album = df[["album_id", "album_name", "album_release_date", "artist_id"]].drop_duplicates(subset = "album_id")
+    save_gold_incremental(dim_album, "dim_album", ["album_id"])
+
+    # Track (unique by track_id)
+    dim_track = df[["track_id", "track_name", "explicit", "popularity"]].drop_duplicates(subset = "track_id")
+    save_gold_incremental(dim_track, "dim_track", ["track_id"])
+
+    # --- PROCESSAMENTO DA TABELA FATO
+
+    fact_recently_played =  df[["played_at", "track_id", "album_id", "duration_ms"]]
+    save_gold_incremental(fact_recently_played, "fact_recently_played", ["played_at", "track_id"])
+
+    print("🏁 Camada GOLD finalizada com sucesso!")
+

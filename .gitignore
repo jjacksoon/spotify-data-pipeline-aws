@@ -1,39 +1,42 @@
-# Ambiente virtual
+# --- AMBIENTE VIRTUAL ---
 .venv/
 venv/
+env/
+ENV/
 
-# Variáveis de ambiente
+# --- VARIÁVEIS DE AMBIENTE E SEGURANÇA ---
+
 .env
-
-# Tokens e credenciais
 token.json
+credentials.json
+*.pem
 
-# Python
+# --- DADOS LOCAIS (DATA LAKE LOCAL) ---
+# Bloqueia toda a pasta data para não subir arquivos CSV ou JSON pesados mantendo a estrutura da pasta, mas não os arquivos
+data/**/*
+
+
+# --- PYTHON ---
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.db
+*.sqlite3
 
-# IDE
+# --- IDEs E EDITORES ---
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Sistema
+# --- SISTEMA ---
 .DS_Store
+Thumbs.db
 
-# Logs
+# --- LOGS E CACHE ---
 *.log
-
-# Arquivos de build
-dist/
-build/
-
-# Cache pytest
 .pytest_cache/
-
-# Cache 
-__pycache__/
-*.pyc
-
-# Dados camadas
-data/raw/
-data/silver/
-data/gold/
+.cache/
+.ipynb_checkpoints/
