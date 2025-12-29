@@ -33,89 +33,82 @@ def load_silver_from_s3() -> pd.DataFrame:
     return pd.read_csv(response['Body'], parse_dates=["played_at"])
 
 def save_gold_incremental(df_new: pd.DataFrame, table_name: str, pk_columns: list):
-    """Função genérica para Carga Incremental na Gold (S3 + RDS).
-    pk_columns: colunas que identificam se o registro é único (ex: artist_id)
+    """
+    Função Genérica para Carga Incremental na Gold (S3 + RDS) com tratamento de datas.
     """
     s3_key = f"gold/{table_name}.csv"
-
-    # --- 1. LÓGICA INCREMENTAL NO S3 ---
-    try:
-        #tente ler o que já existe na gold do S3
-        response = s3_client.get_object(Bucket = BUCKET_NAME, Key = s3_key)
-        df_existing = pd.read_csv(response['Body'])
-
-        #Faça o merge para identificar o que é novo (Left Anti-Join)
-        df_merged = df_new.merge(
-            df_existing[pk_columns], on = pk_columns, how = "left", indicator= True
-        )
-        df_to_insert = df_merged[df_merged["_merge"]== "left_only"].drop(columns="_merge")
-
-        #DataFrame final consolidado
-        df_final = pd.concat([df_existing, df_to_insert], ignore_index = True)
-
-    except s3_client.exceptions.NoSuchKey:
-        #Se a tabela não existe, tudo é novo
-        print(f"✨ Criando nova tabela Gold no S3: {table_name}")
-        df_final = df_new           #Se não existe tabela  → o resultado final é exatamente o dado novo
-        df_to_insert = df_final     #O que será persistido no S3, ou seja, tudo que chegou agora será inserido
     
+    # Garantir que se houver 'played_at' no novo dado, ele seja datetime com UTC
+    if "played_at" in df_new.columns:
+        df_new["played_at"] = pd.to_datetime(df_new["played_at"], utc=True)
+    
+    try:
+        # Tenta ler o que já existe na Gold do S3
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+        df_existing = pd.read_csv(response['Body'])
+        
+        # Garantir que o dado que veio do S3 também seja convertido para datetime UTC antes do merge
+        if "played_at" in df_existing.columns:
+            df_existing["played_at"] = pd.to_datetime(df_existing["played_at"], utc=True)
+        
+        # Agora o merge vai funcionar porque ambos são datetime64[ns, UTC]
+        df_merged = df_new.merge(
+            df_existing[pk_columns], on=pk_columns, how="left", indicator=True
+        )
+        df_to_insert = df_merged[df_merged["_merge"] == "left_only"].drop(columns="_merge")
+        
+        # DataFrame final consolidado
+        df_final = pd.concat([df_existing, df_to_insert], ignore_index=True)
+        
+    except s3_client.exceptions.NoSuchKey:
+        print(f"✨ Criando nova tabela Gold no S3: {table_name}")
+        df_final = df_new
+        df_to_insert = df_new
+
+    # ... restante do código (salvamento no S3 e RDS) permanece igual ...
     if df_to_insert.empty:
         print(f"⚠️ {table_name}: Sem registros novos.")
     else:
-        #Salva o arquivo completo de volta no S3
         csv_buffer = StringIO()
-        df_final.to_csv(csv_buffer, index = False)
-        s3_client.put_object(
-            Bucket = BUCKET_NAME,
-            Key = s3_key, 
-            Body = csv_buffer.getvalue()
-        )
+        df_final.to_csv(csv_buffer, index=False)
+        s3_client.put_object(Bucket=BUCKET_NAME, Key=s3_key, Body=csv_buffer.getvalue())
         print(f"✅ {table_name} atualizada no S3: +{len(df_to_insert)} linhas.")
 
-    
-    # --- 2. SINCRONIZAÇÃO COM O RDS ---
     engine = get_db_engine()
     
+    # Se você adicionou o DROP CASCADE com text(), mantenha-o aqui:
     with engine.connect() as conn:
-        # O segredo é envolver a string no text()
+        from sqlalchemy import text
         conn.execute(text(f"DROP TABLE IF EXISTS gold.{table_name} CASCADE;"))
-        # No SQLAlchemy 2.0, o commit deve ser explícito em conexões manuais
         conn.commit()
 
-    # Agora o Pandas segue com o processo normal
-    df_final.to_sql(
-        table_name, 
-        con=engine, 
-        schema='gold', 
-        if_exists='replace', 
-        index=False
-    )
+    df_final.to_sql(table_name, con=engine, schema='gold', if_exists='replace', index=False)
     print(f"🏆 RDS: gold.{table_name} sincronizada ({len(df_final)} total).")
 
-
 def run_gold():
-    print(f"🥇 Iniciando processamento GOLD (Cloud)...")
+    print("🥇 Iniciando processamento GOLD (Cloud)...")
     
-    # Carregando dados da Silver (S3)
+    # Carrega os dados da Silver (S3)
     df = load_silver_from_s3()
 
-    # --- PROCESSAMENTO DAS TABELAS DIMENSÕES ---
-
-    # Artist (unique by artist_id)
-    dim_artist = df[["artist_id", "artist_name"]].drop_duplicates(subset = ["artist_id"])
+    # --- PROCESSAMENTO DAS DIMENSÕES (Adicionando .copy()) ---
+    
+    # Artistas - Usamos .copy() no final para evitar o SettingWithCopyWarning
+    dim_artist = df[["artist_id", "artist_name"]].drop_duplicates(subset=["artist_id"]).copy()
     save_gold_incremental(dim_artist, "dim_artist", ["artist_id"])
 
-    # Album (unique by album_id)
-    dim_album = df[["album_id", "album_name", "album_release_date", "artist_id"]].drop_duplicates(subset = "album_id")
+    # Álbuns - Adicionando .copy()
+    dim_album = df[["album_id", "album_name", "album_release_date", "artist_id"]].drop_duplicates(subset=["album_id"]).copy()
     save_gold_incremental(dim_album, "dim_album", ["album_id"])
 
-    # Track (unique by track_id)
-    dim_track = df[["track_id", "track_name", "explicit", "popularity"]].drop_duplicates(subset = "track_id")
+    # Faixas - Adicionando .copy()
+    dim_track = df[["track_id", "track_name", "explicit", "popularity"]].drop_duplicates(subset=["track_id"]).copy()
     save_gold_incremental(dim_track, "dim_track", ["track_id"])
 
-    # --- PROCESSAMENTO DA TABELA FATO
-
-    fact_recently_played =  df[["played_at", "track_id", "album_id", "duration_ms"]]
+    # --- PROCESSAMENTO DA FATO ---
+    
+    # Fato - Adicionando .copy()
+    fact_recently_played = df[["played_at", "track_id", "album_id", "duration_ms"]].copy()
     save_gold_incremental(fact_recently_played, "fact_recently_played", ["played_at", "track_id"])
 
     print("🏁 Camada GOLD finalizada com sucesso!")
